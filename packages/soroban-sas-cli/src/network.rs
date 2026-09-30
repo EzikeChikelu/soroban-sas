@@ -13,15 +13,39 @@
 //! 3. The global `--network <name>` shorthand, resolved by this module.
 //! 4. Otherwise: a clear error naming what's missing.
 //!
+//! Additionally, a TOML configuration file can provide defaults for the
+//! RPC URL and network passphrase, as well as a default network name.
+//! See [`crate::config`] for the loading logic.
+//!
 //! For unit tests, [`MockNetworkClient`] provides an in-memory implementation
 //! of the network client trait so command logic can be exercised without
 //! touching a live RPC endpoint.
+use serde::Deserialize;
 
 /// Resolved connection details for a named network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub rpc_url: String,
     pub network_passphrase: String,
+}
+
+/// TOML configuration file structure for default RPC/network settings.
+///
+/// Example `config.toml`:
+/// ```toml
+/// default_network = "testnet"
+/// rpc_url = "https://soroban-testnet.stellar.org"
+/// network_passphrase = "Test SDF Network ;; September 2015"
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
+pub struct TomlConfig {
+    /// Optional default network name (e.g. "testnet", "futurenet", "mainnet", "local").
+    pub default_network: Option<String>,
+    /// Optional default R PC URL.
+    pub rpc_url: Option<String>,
+    /// Optional default network passphrase.
+    pub network_passphrase: Option<String>,
 }
 
 /// Resolves a `--network` shorthand to its RPC URL and passphrase.
@@ -173,5 +197,50 @@ mod tests {
         let (url, passphrase) = takes_client(&client);
         assert_eq!(url, config.rpc_url);
         assert_eq!(passphrase, config.network_passphrase);
+    }
+
+    #[test]
+    fn toml_config_deserializes_all_fields() {
+        let toml = r#"
+            default_network = "testnet"
+            rpc_url = "https://example.com/rpc"
+            network_passphrase = "Test SDF Network ; September 2015"
+        "#;
+        let config: TomlConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.default_network, Some("testnet".to_string()));
+        assert_eq!(config.rpc_url, Some("https://example.com/rpc".to_string()));
+        assert_eq!(
+            config.network_passphrase,
+            Some("Test SDF Network ; September 2015".to_string())
+        );
+    }
+
+    #[test]
+    fn toml_config_allows_partial_fields() {
+        let toml = r#"
+            default_network = "futurenet"
+        "#;
+        let config: TomlConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.default_network, Some("futurenet".to_string()));
+        assert!(config.rpc_url.is_none());
+        assert!(config.network_passphrase.is_none());
+    }
+
+    #[test]
+    fn toml_config_ignores_unknown_fields() {
+        let toml = r#"
+            default_network = "local"
+            unknown_field = "ignore me"
+        "#;
+        let config: TomlConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.default_network, Some("local".to_string()));
+    }
+
+    #[test]
+    fn toml_config_default_is_empty() {
+        let config = TomlConfig::default();
+        assert!(config.default_network.is_none());
+        assert!(config.rpc_url.is_none());
+        assert!(config.network_passphrase.is_none());
     }
 }

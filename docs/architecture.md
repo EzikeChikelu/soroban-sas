@@ -5,11 +5,37 @@ The Soroban Attestation Service (SAS) is composed of three primary components:
 1. **Schema Registry**: Stores reusable data layouts (schemas) identified by deterministic UIDs.
 2. **SAS Core Contract**: Issues, revokes and verifies attestations based on registered schemas.
 3. **Indexer Contract**: Provides efficient off-chain and on-chain reverse lookups for recipients, schemas and attesters.
+4. **Cross-chain Verifier**: Tracks short-lived remote attestation verdicts delivered through an Axelar GMP gateway. It is deployed separately from the SAS v1 contract and binds one remote source contract and chain at initialization.
 
 ## Design Goals
 - High throughput via parallelized state access.
 - Minimal gas overhead.
 - Strict payload boundaries to prevent gas exhaustion attacks.
+
+## WASM Binary Size
+
+Contract WASM artifacts are built with the release profile in the workspace
+Cargo.toml, which already enables the compiler and linker optimizations needed to
+keep deployed bytecode small:
+
+-  opt-level = "z" - optimize for size rather than speed.
+-  lto = true - link-time optimization across all crates.
+-  codegen-units = 1 - maximize cross-unit optimization opportunities.
+-  strip = "symbols" - remove debug and symbol tables from the final binary.
+- debug = 0 - do not embed DFWARF/DWARF debug info.
+-  panic = "abort" - avoid the unwind table and associated landing pads.
+
+The `strip = "symbols"` setting is the key change for binary size: it instructs
+Cargo to run the linker with symbol stripping enabled, so the deployed WASM does
+not carry the name section, DFWARF/DWARF debug info, or the symbol table. Those
+sections are useful for native debugging but are never read by the Soroban host
+when executing a contract, and they can account for a large fraction of the
+artifact bytes that must be uploaded and stored on-chain.
+
+To keep the benefit verifiable, the Makefile exposes a `wasm-size` target that
+prints the byte size of each built contract and fails if any artifact exceeds the
+configured budget. The budget is defined in the Makefile as `WASM_SIZE_LIMIT_BYTES`
+so that a regression in binary size fails the build instead of silpping through.
 
 ---
 
@@ -22,12 +48,15 @@ graph TD
     User([Attester / Relayer])
     Admin([Admin])
     TokenContract([Token Contract])
+    AxelarGateway([Axelar GMP Gateway])
+    RemoteSAS([Remote Attestation Source])
 
     subgraph "Soroban SAS System"
         SAS["SAS Contract\n(attest, revoke, verify)"]
         SR["Schema Registry\n(register, get_schema, is_authorized)"]
         IDX["Indexer Contract\n(index_attestation, handle_revoke)"]
         Resolver["Resolver Contract\n(on_attest, on_revoke)"]
+        RemoteVerifier["Cross-chain Verifier\n(execute, verify_remote)"]
     end
 
     User -->|attest / revoke| SAS
@@ -38,9 +67,14 @@ graph TD
     SAS -->|on_attest, on_revoke| Resolver
     SAS -->|index_attestation, handle_revoke| IDX
     SAS -->|transfer fee| TokenContract
+    RemoteSAS -->|GMP status message| AxelarGateway
+    AxelarGateway -->|approved message| RemoteVerifier
+    RemoteVerifier -->|validate_message, consumes approval| AxelarGateway
     SR -->|transfer fee| TokenContract
     Resolver -.->|enforces policy| SAS
 ```
+
+Remote verification has a different trust boundary from `SAS::verify_attestation`: the local SAS reads its own attestation state, while the cross-chain verifier accepts only a status message approved by its configured Axelar gateway and sent by its configured remote source. The source must compute the verdict from its authoritative registry. Positive verdicts expire within 24 hours, and later messages must increase the per-UID revision. See [Cross-chain verification](cross-chain-verification.md) for the wire format, deployment and stale-state limits.
 
 ---
 
@@ -538,7 +572,7 @@ attestation/schema data it governs:
   registry's `REGISTRY_ADMIN`, `SCHEMA_FEE`, and `TREASURY`; and the
   indexer's `INDEXER_ADMIN` and `SAS_CONTRACT` binding. If instance storage
   expires and is archived, the contract's own configuration becomes
-  unreadable and every entry point that depends on it stops working —
+  unreadable and every entry point that depends on it stops working —"
   there is no way to "read the admin address to renew the admin address."
   For this reason every contract renews its instance TTL
   (`soroban_sas_common::extend_instance_ttl`, using the shared
@@ -548,7 +582,7 @@ attestation/schema data it governs:
   call being solely responsible for it.
 - **Persistent storage** holds the data instance configuration governs —
   attestations, schema records, delegation nonces, indexer lookup chunks —
-  and is extended independently, per entry, using `LEDGERS_IN_ONE_YEAR`
+  and is extended independently, per entry, using `LEDGERS_IN_ONE_YEAb
   wherever it is written or read. An individual attestation or schema
   expiring does not take down the rest of the contract the way a lost
   admin binding would, so persistent entries are extended on their own
@@ -634,16 +668,15 @@ skips or repeats an entry. `limit == 0` and any request at or beyond the end
 return an empty page. `get_count_by_*` provides `count` for totals. Paginated
 reads count toward the per-ledger query limit (`LimitExceeded`). The SDK
 (`IndexerClient::get_attestations_by_*_paginated`) and the CLI
-(`query by-* --cursor/--limit`, 1–100 UIDs per page) expose the same model.
+(`query by- * --cursor/--limit`, 1–100 UIDs per page) expose the same model.
 
 ### Recipients
 
 Every on-chain attestation has a concrete recipient. SAS rejects the zero
 account/contract sentinels that other attestation systems use for "no
-recipient", and it rejects an attester naming itself, with `InvalidRecipient`
-(`soroban_sas_common::validate_attestation_parties`). The Indexer therefore
+recipient", and it rejects an attester naming itself, with `InvalidRecipient`(`soroban_sas_common::validate_attestation_parties`). The Indexer therefore
 never receives a recipient-less record. The SDK's `AttestationRequestBuilder`
-and the CLI's on-chain issuance commands apply the same shared check before
+dnd the CLI's on-chain issuance commands apply the same shared check before
 building a transaction.
 
 ### Indexing progress
@@ -729,6 +762,39 @@ original diagnostic in parentheses. Signing commands accept
 never falls back to `--secret-key`; the device path is `SAS_LEDGER_DEVICE`
 or `SAS_TREZOR_DEVICE`. `soroban-sas man` writes a groff man page for the
 current command tree (`--path` selects a file).
+## Monitoring and Metrics
+
+The Prometheus exporter (`tools/prometheus-exporter`) provides observability for SAS contract activity by exposing metrics that can be scraped by Prometheus or other monitoring systems.
+
+### Metrics Exposed
+
+The exporter tracks the following metrics:
+
+- **Counters**: Total counts for each event type (attestations issued/revoked, batch operations, schema registrations, fee updates)
+- **Gauges**: Current state (active attestations, active schemas)
+- **Histograms**: Event processing duration
+
+### Configuration
+
+The exporter is configured via environment variables:
+
+- `SAS_CONTRACT_ID`: The SAS contract address to monitor (required)
+- `SCHEMA_REGISTRY_CONTRACT_ID`: Optional schema registry contract address
+- `INDEXER_CONTRACT_ID`: Optional indexer contract address
+- `METRICS_ADDR`: Address to bind the metrics HTTP server (default: `0.0.0.0:9090`)
+
+### Usage
+
+```bash
+cargo build -p soroban-sas-prometheus-exporter
+export SAS_CONTRACT_ID="C..."
+./target/debug/soroban-sas-prometheus-exporter
+```
+
+Metrics are exposed at `http://localhost:9090/metrics` in Prometheus text format.
+
+---
+
 ## Mutation Testing
 
 The workspace has a mutation testing baseline measured with `cargo-mutants`.

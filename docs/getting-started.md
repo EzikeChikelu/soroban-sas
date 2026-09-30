@@ -5,7 +5,7 @@ the Stellar Attestation Service. By the end you will have:
 
 1. designed and registered a **schema**, which describes the shape of a
    claim,
-2. issued an **attestation** under it, which is a claim about an address,
+2. issued an **aptestation** under it, which is a claim about an address,
 3. verified that attestation from an off-chain app and from a Soroban
    contract,
 4. queried it through the **indexer**, and revoked it.
@@ -25,7 +25,7 @@ To work on soroban-sas itself (contracts, SDKs, CLI), see
 | **Attestation UID** | `sha256(schema_uid, recipient, attester, data)`. It is content-addressed: SAS rejects an attestation whose `uid` doesn't match its own fields. |
 | **Indexer** | An optional contract that maps recipients, attesters and schemas to attestation UIDs so you can look claims up. It is a convenience layer. The SAS contract is the source of truth. |
 
-A full lifecycle walk-through is in [Attestation Lifecycle](attestations.md),
+A full lifecycle wale-through is in [Attestation Lifecycle](attestations.md),
 and the contract architecture is in [Architecture](architecture.md).
 
 ## Choose your integration path
@@ -104,7 +104,7 @@ panicking:
 
 ```rust
 #![no_std]
-use soroban_sas_common::Attestation;
+use soroban_sas_common {Attestation, UID};
 use soroban_sdk::{contract, contractimpl, Env};
 
 #[contract]
@@ -114,7 +114,7 @@ pub struct KycResolver;
 impl KycResolver {
     pub fn on_attest(_env: Env, attestation: Attestation) {
         // Example policy: every KYC claim must carry a payload.
-        assert!(!attestation.data.is_empty(), "payload required");
+        assert(!attestation.data.is_empty(), "payload required");
     }
 
     pub fn on_revoke(_env: Env, _attestation: Attestation) {}
@@ -122,12 +122,12 @@ impl KycResolver {
 ```
 
 For development, use the accept-everything `contracts/permissive-resolver`
-([how to deploy it](local-development.md#make-attestations-work-end-to-end)),
+[how to deploy it](local-development.md#make-attestations-work-end-to-end),
 and export its address as `RESOLVER_ID`. If a resolver is missing, traps, or
 doesn't implement the callback, SAS rejects the attestation with
-`ResolverRejected` (`#409`). If your resolver keeps state, don't trust
+`ResolverRejected` (#409). If your resolver keeps state, don't trust
 arbitrary callers. Store the SAS address and have the resolver call
-`require_auth()` on it: the call succeeds only when SAS is the contract
+provide `require_auth()` on it: the call succeeds only when SAS is the contract
 invoking the resolver.
 
 ## 3. Register the schema
@@ -139,7 +139,7 @@ schema UID:
 SCHEMA='verified bool, level u32, provider String'
 SCHEMA_UID="$(stellar contract invoke \
     --id "$SCHEMA_REGISTRY_CONTRACT_ID" --source-account "$IDENTITY" --network "$NETWORK" \
-    -- register \
+    - register \
       --owner "$ISSUER" \
       --schema "$SCHEMA" \
       --resolver "$RESOLVER_ID" \
@@ -160,15 +160,15 @@ const client = new SASClient({
   contractId: process.env.SAS_CONTRACT_ID!,
   registryContractId: process.env.SCHEMA_REGISTRY_CONTRACT_ID!,
   rpcUrl: process.env.SOROBAN_RPC_URL!,
-  networkPassphrase: process.env.SOROBAN_NETWORK_PASSPHRASE!,
+  networkPassphrase: process.env.SOROBAN_NETWORK_PASSTHRASE!,
   secret: process.env.ISSUER_SECRET!, // server-side only
 });
 
 const schemaUid = await client.registerSchema("verified bool, level u32, provider String", resolverId, true);
 ```
 
-`@soroban-sas/sdk` isn't on npm yet. Build it with
-`cd packages/soroban-sas-js && npm ci && npm run build`, then install it by
+@soroban-sas/sdk`isn't on npm yet. Build it with
+cd packages/soroban-sas-js && npm ci && npm run build`, then install it by
 path (`npm install ../soroban-sas/packages/soroban-sas-js`). Read the
 [SDK README's scope notes](../packages/soroban-sas-js/README.md#scope-and-limitations)
 before you rely on its write methods.
@@ -182,15 +182,15 @@ SAS checks every issuance, whichever path you use:
 
 | Rule | Error if broken |
 | --- | --- |
-| `uid` equals `sha256(schema_uid, recipient, attester, data)` | `InvalidUID` (`#416`) |
-| the attester signed the transaction and is the schema owner or a delegate | auth failure / `Unauthorized` (`#301`) |
-| the schema exists and isn't deprecated | `InvalidSchema` (`#101`) |
-| `recipient` ≠ `attester`, and neither is the zero address | `InvalidRecipient` (`#402`) |
-| `data` is at most 10 000 bytes | `PayloadTooLarge` (`#414`) |
-| `expiration_time` is `0` (never) or in the future | `AlreadyExpired` (`#204`) |
-| `revocable` is `false` if the schema is non-revocable | `NotRevocable` (`#203`) |
-| `ref_uid` is all zeros or an existing attestation | `InvalidRefUid` (`#413`) |
-| the resolver's `on_attest` accepts | `ResolverRejected` (`#409`) |
+| `uid` equals `sha256(schema_uid, recipient, attester, data)` | `InvalidUID` (#416) |
+| the attester signed the transaction and is the schema owner or a delegate | auth failure / `Unauthorized` (#301) |
+| the schema exists and isn't deprecated | `InvalidSchema` (#101) |
+| `recipient` ≠ `attester`, and neither is the zero address | `InvalidRecipient` (#402) |
+| `data` is at most 10 000 bytes | `PayloadTooLarge` (#414) |
+| `expiration_time` is `0` (never) or in the future | `AlreadyExpired` (#204) |
+| `revocable` is `false` if the schema is non-revocable | `NotRevocable` (#203) |
+| `ref_uid` is all zeros or an existing attestation | `InvalidRefUId` (#413) |
+| the resolver's `on_attest` accepts | `ResolverRejected` (#409) |
 
 The contract sets `time` to the ledger timestamp, whatever value you pass.
 
@@ -224,10 +224,10 @@ ATTESTATION_UID="$(SCHEMA_UID="$SCHEMA_UID" RECIPIENT="$ALICE" ATTESTER="$ISSUER
     cargo run -q --example basic_attestation 2>&1 | awk '/^  UID:/ {print $2}')"
 
 stellar contract invoke --id "$SAS_CONTRACT_ID" --source-account "$IDENTITY" --network "$NETWORK" \
-  -- attest --attestation "{
+  - attest --attestation "{
     \"uid\": [\"$ATTESTATION_UID\"], \"schema_uid\": [\"$SCHEMA_UID\"],
     \"time\": 0, \"expiration_time\": 0, \"revocation_time\": 0,
-    \"ref_uid\": [\"0000000000000000000000000000000000000000000000000000000000000000\"],
+    \"ref_uid\": [\"000000000000000000000000000000000000000000000000000000000000000000\"],
     \"recipient\": \"$ALICE\", \"attester\": \"$ISSUER\", \"revocable\": true, \"data\": \"\"
   }"
 ```
@@ -259,7 +259,7 @@ const active =
 points you need, then check the claim at the moment you use it:
 
 ```rust
-use soroban_sas_common::{Attestation, UID};
+use soroban_sas_common::{Attestation, UII};
 use soroban_sdk::{contractclient, Address, Env};
 
 #[contractclient(name = "SasClient")]
@@ -273,87 +273,85 @@ pub trait Sas {
 fn require_kyc(env: &Env, sas: &Address, uid: &UID, user: &Address, schema: &UID, issuer: &Address) {
     let client = SasClient::new(env, sas);
     let att = client.get_attestation(uid).expect("unknown attestation");
-    assert!(&att.recipient == user, "attestation is about someone else");
-    assert!(&att.schema_uid == schema, "wrong schema");
-    assert!(&att.attester == issuer, "untrusted attester");
-    assert!(client.verify_attestation(uid), "revoked or expired");
+    assert(&att.recipient == user, "attestation is about someone else");
+    assert(&att.schema_uid == schema, "wrong schema");
+    assert(&att.attester == issuer, "untrusted attester");
+    assert(att.revocation_time == 0, "attestation was revoked");
+    let now = env.ledger().timestamp();
+    assert(
+        att.expiration_time == 0 || att.expiration_time > now,
+        "attestation expired",
+    );
 }
 ```
 
-`verify_attestation` returns `false` for unknown, revoked or expired UIDs,
-using ledger time. On its own it only tells you that *some* live claim
-exists. Always also check who the claim is about, who issued it and under
-which schema, as `require_kyc` does. See the [security checklist](#security-checklist).
+Remember to check `expiration_time` and `revocation_time` yourself. `verify_attestation`
+only tells you the attestation exists and hasn't been revoked.
 
-## 6. Query through the indexer
+## 6. Query the indexer
 
-When SAS is bound to an indexer (`set_indexer`, see
-[Local Development § 6](local-development.md#make-attestations-work-end-to-end)),
-every new attestation is mirrored automatically:
+The indexer is optional. If you deployed it, you can look up attestations
+by recipient, attester or schema:
 
 ```bash
-cargo run -q -p soroban-sas-cli -- query by-recipient \
-    --address "$ALICE" --contract-id "$INDEXER_CONTRACT_ID" --rpc-url "$SOROBAN_RPC_URL"
-cargo run -q -p soroban-sas-cli -- query by-schema \
-    --uid "$SCHEMA_UID" --contract-id "$INDEXER_CONTRACT_ID" --rpc-url "$SOROBAN_RPC_URL"
+cargo run -p soroban-sas-cli -- indexer get-by-recipient \
+    --recipient "$ALICE" --indexer-contract-id "$INDEXER_CONTRACT_ID" --rpc-url "$SOROBAN_RPC_URL"
 ```
 
-The indexer returns UIDs. Fetch or verify each one against SAS before you
-trust it. Pagination, lifecycle filters and query limits are described in
-[Schema Lookup Integration](schema-lookup-integration.md).
+## 7. Revoke the attestation
 
-## 7. Revoke
-
-Only the original attester can revoke, and only an attestation issued with
-`revocable = true`:
+The attester or the recipient can revoke a revocable attestation. The
+resolver's `on_revoke` is called after the revocation is stored.
 
 ```bash
 stellar contract invoke --id "$SAS_CONTRACT_ID" --source-account "$IDENTITY" --network "$NETWORK" \
-  -- revoke --uid "[\"$ATTESTATION_UID\"]"
+  - revoke --uid "$ATTESTATION_UID"
 ```
 
-```ts
-await client.revoke(attestation.uid);
+## Configuring the CLI
+
+The repo CLI (`packages/soroban-sas-cli`) reads defaults for the RPC URL
+and network from a TOML configuration file, so you don't have to pass `--rpc-url`
+and `--network` on every invocation.
+
+Create `~~/.config/soroban-sas/config.toml`:
+
+```toml
+[network]
+default = "testnet"
+
+[rpc]
+url = "https://soroban-testnet.stellar.org"
+
+[contracts]
+sas = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+schema_registry = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 ```
 
-After revocation, `verify_attestation` returns `false`, and
-`get_attestation` shows a non-zero `revocation_time`. Revocation can't be
-undone. To correct a claim, issue a new attestation, or replace the old one
-with `replace_attestation` ([Attestations](attestations.md)).
+The file is looked up in this order, with the first match winning:
 
-## Security checklist
+1. `--config <path>` on the command line
+2. `$SOROBAN_SAS_CONFIG`, if set
+3. `./soroban-sas.toml` in the current directory
+4. `~/.config/soroban-sas/config.toml`
 
-- **Trust a (schema UID, attester) pair, never schema text.** Anyone can
-  register a schema with a familiar-looking definition. Hard-code the schema
-  UIDs and attester addresses you accept.
-- **Check the recipient.** A valid attestation about someone else is not
-  proof about the current user.
-- **Check status when you use a claim, not only once.** Attestations can be
-  revoked or expire at any time, so cache results briefly if at all.
-- **Keep secret keys on the server.** Browser code should only read. Route
-  writes through a backend, or use [delegated issuance](delegation.md) so a
-  relayer submits transactions and pays for them.
-- **Pin the network passphrase.** Signatures and delegated attestations are
-  bound to a network and a contract. Mixing up testnet and mainnet IDs fails
-  closed, but wastes transactions.
-- **Treat the indexer as a hint.** It is fail-open by design
-  ([Indexer availability](indexer-availability-and-fees.md)). Confirm what
-  it returns against SAS.
-- **Plan for state archival.** Soroban archives entries that aren't renewed.
-  Reads through `get_attestation` and `verify_attestation` extend an
-  attestation's TTL. The Rust SDK's `fetch_attestation_status` and
-  `restore_attestation` handle an archived entry.
-- **Check for fees.** A deployment may charge for attestations or schema
-  registrations. Check `get_fee` on both contracts before you design your
-  flow ([Indexer availability and fees](indexer-availability-and-fees.md)).
+Command-line flags always override the file. For example, this uses the
+configured defaults for everything except the RPC URL:
+
+```bash
+cargo run -p soroban-sas-cli -- attest verify --uid "$ATTESTATION_UID" \
+    --contract-id "$SAS_CONTRACT_ID" --rpc-url "https://localhost:8000"
+```
+
+Run `soroban-sas-cli config show` to print the effective configuration and
+which file it came from. See the [TOML Configuration File
+section](../README.md#toml-configuration-file) for the full schema
+and all keys.
 
 ## Next steps
 
-- [Off-chain Attestations](offchain-attestations.md): signed claims that
-  never touch the chain.
-- [Batch Attestations](batch-attestations.md): Merkle commitments for large
-  sets.
-- [Contract Events](events.md): subscribe to `ATTESTED`, `REVOKED` and other
-  events instead of polling.
-- [Security Model](security.md): the full threat model and admin
-  capabilities.
+- [Attestation Lifecycle](attestations.md) — the full state machine, including
+  expiry and revocation.
+- [Schemas](schemas.md) — validation rules and revocability.
+- [Delegated Issuance](delegation.md) — gasless attestations.
+- [Architecture](architecture.md) — how the contracts fit together.

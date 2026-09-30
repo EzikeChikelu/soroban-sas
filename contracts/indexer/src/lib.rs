@@ -39,6 +39,8 @@ pub struct Indexer;
 //   (Address, chunk_idx)                 - Chunks of UIDs per attester
 //   (STATUS_KEY, UID)                    - Lifecycle status per attestation
 //   (INDEXED_KEY, UID)                   - Idempotency record (recipient, schema, attester)
+//   (RECIPIENT_ATTESTATION, Address, UID) - Direct recipient-to-attestation mapping
+//   (RECIPIENT_ATTESTATION_COUNT, Address) - Count of direct mappings per recipient
 // ============================================================================
 
 /// Address allowed to administer this indexer instance.
@@ -70,6 +72,14 @@ const INDEXED_KEY: Symbol = symbol_short!("INDEXED");
 const QUERY_COUNTER_SEQ: Symbol = symbol_short!("QCSEQ");
 /// Instance key for tracking query count in the current sequence.
 const QUERY_COUNTER_COUNT: Symbol = symbol_short!("QCOUNT");
+/// Persistent key prefix for a direct recipient-to-attestation mapping:
+/// `(RECIPIENT_ATTESTATION, recipient, uid)` stores `true` when `uid` is
+/// indexed under `recipient`. Enables O(1) membership checks.
+const RECIPIENT_ATTESTATION: Symbol = symbol_short!("RATT");
+/// Persistent key prefix for the count of direct recipient mappings:
+/// `(RECIPIENT_ATTESTATION_COUNT, recipient)` stores the number of UIDs
+/// directly mapped to `recipient`.
+const RECIPIENT_ATTESTATION_COUNT: Symbol = symbol_short!("RATTC");
 
 /// The `(recipient, schema_uid, attester)` triple a UID was first indexed
 /// with. A later `index_attestation` for the same UID must supply an
@@ -270,6 +280,37 @@ fn index_address_uid(env: &Env, key: &Address, uid: &UID, total_key: Symbol) {
 
     total += 1;
     env.storage().persistent().set(&count_key, &total);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, LEDGERS_IN_ONE_YEAR, LEDGERS_IN_ONE_YEAR);
+    extend_instance_ttl(env);
+}
+
+/// Records a direct recipient-to-attestation mapping for O(1) membership
+/// checks. Stores a boolean flag keyed by `(RECIPIENT_ATTESTATION, recipient,
+/// uid)` and increments the per-recipient mapping counter. Idempotent: a
+/// repeated call for the same `(recipient, uid)` pair is a no-op that only
+/// renews TTLs, so retries cannot inflate the mapping count.
+fn index_recipient_attestation(env: &Env, recipient: &Address, uid: &UID) {
+    let mapping_key = (RECIPIENT_ATTESTATION, recipient.clone(), uid.clone());
+    if env.storage().persistent().has(&mapping_key) {
+        env.storage().persistent().extend_ttl(
+            &mapping_key,
+            LEDGERS_IN_ONE_YEAR,
+            LEDGERS_IN_ONE_YEAR,
+        );
+        return;
+    }
+    env.storage().persistent().set(&mapping_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&mapping_key, LEDGERS_IN_ONE_YEAR, LEDGERS_IN_ONE_YEAR);
+
+    let count_key = (RECIPIENT_ATTESTATION_COUNT, recipient.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    env.storage()
+        .persistent()
+        .set(&count_key, &count.saturating_add(1));
     env.storage()
         .persistent()
         .extend_ttl(&count_key, LEDGERS_IN_ONE_YEAR, LEDGERS_IN_ONE_YEAR);
@@ -561,6 +602,7 @@ impl Indexer {
         );
 
         index_address_uid(&env, &recipient, &uid, RECIPIENT_TOTAL);
+        index_recipient_attestation(&env, &recipient, &uid);
         index_uid_uid(&env, &schema_uid, &uid, SCHEMA_TOTAL);
         index_address_uid(&env, &attester, &uid, ATTESTER_TOTAL);
 
@@ -590,13 +632,48 @@ impl Indexer {
 
     /// Total number of UIDs indexed under `address` as a recipient, across
     /// every chunk. `0` if the key has never been indexed. A pure read: like
-    /// [`Indexer::index_total`], it renews the counter's TTL when found but
+    /// `index_total`, it renews the counter's TTL when found but
     /// creates no storage for a key that was never indexed. Lets callers
     /// compute pagination totals (`ceil(count / page_size)`) without
     /// fetching every UID just to learn how many there are (#220).
     pub fn get_count_by_recipient(env: Env, address: Address) -> u32 {
         extend_instance_ttl(&env);
         index_total(&env, &(RECIPIENT_TOTAL, address))
+    }
+
+    /// Returns `true` when `uid` is directly mapped to `recipient` in the
+    /// recipient-to-attestation index. O(1) persistent lookup; renews the
+    /// mapping's TTL when found. Returns `false` for a pair that was never
+    /// indexed, without creating storage.
+    pub fn has_recipient_attestation(env: Env, recipient: Address, uid: UID) -> bool {
+        extend_instance_ttl(&env);
+        let mapping_key = (RECIPIENT_ATTESTATION, recipient, uid);
+        let present = env.storage().persistent().has(&mapping_key);
+        if present {
+            env.storage().persistent().extend_ttl(
+                &mapping_key,
+                LEDGERS_IN_ONE_YEAR,
+                LEDGERS_IN_ONE_YEAR,
+            );
+        }
+        present
+    }
+
+    /// Total number of direct recipient-to-attestation mappings recorded for
+    /// `address`. `0` if the recipient has never been indexed. A pure read:
+    /// renews the counter's TTL when found but creates no storage.
+    pub fn get_recipient_attestation_count(env: Env, address: Address) -> u32 {
+        extend_instance_ttl(&env);
+        let count_key = (RECIPIENT_ATTESTATION_COUNT, address);
+        let count: Option<u32> = env.storage().persistent().get(&count_key);
+        if count.is_some() {
+            env.storage().persistent().extend_ttl(
+                &count_key,
+                LEDGERS_IN_ONE_YEAR,
+                LEDGERS_IN_ONE_YEAR,
+            );
+        }
+        count.unwrap_or(0)
     }
 
     /// Total number of UIDs indexed under `schema_uid`. See
@@ -632,7 +709,7 @@ impl Indexer {
 
     /// Complete schema history, oldest first. See
     /// [`Indexer::get_attestations_by_recipient`] for the chunking contract
-    /// and [`read_chunk`] for the read-path retention policy: every schema
+    /// and `read_chunk` for the read-path retention policy: every schema
     /// chunk this walks has its TTL renewed, and an empty lookup stays
     /// read-only and returns an empty vector.
     pub fn get_attestations_by_schema(env: Env, schema_uid: UID) -> soroban_sdk::Vec<UID> {
@@ -648,7 +725,7 @@ impl Indexer {
 
     /// Complete attester history, oldest first. See
     /// [`Indexer::get_attestations_by_recipient`] for the chunking contract
-    /// and [`read_chunk`] for the read-path retention policy: every attester
+    /// and `read_chunk` for the read-path retention policy: every attester
     /// chunk this walks has its TTL renewed, and an empty lookup stays
     /// read-only and returns an empty vector.
     pub fn get_attestations_by_attester(env: Env, attester: Address) -> soroban_sdk::Vec<UID> {
@@ -794,6 +871,124 @@ impl Indexer {
             |chunk_index| read_chunk(&env, &(attester.clone(), chunk_index)),
             include_revoked,
         )
+    }
+
+    /// Total number of UIDs indexed under `issuer` as an attestation issuer.
+    ///
+    /// `issuer` is an alias for the attester dimension: in this system's
+    /// terminology (see `docs/getting-started.md` and `docs/delegation.md`)
+    /// the account that calls `SAS::attest` is the attestation's issuer, so
+    /// this reads the same `ATTESTER_TOTAL` counter as
+    /// [`Indexer::get_count_by_attester`] under a name that matches how
+    /// callers look up "who issued this" (#310).
+    pub fn get_count_by_issuer(env: Env, issuer: Address) -> u32 {
+        extend_instance_ttl(&env);
+        index_total(&env, &(ATTESTER_TOTAL, issuer))
+    }
+
+    /// Complete issuer history, oldest first. Alias for
+    /// [`Indexer::get_attestations_by_attester`]; see
+    /// [`Indexer::get_count_by_issuer`] for the issuer/attester naming (#310).
+    pub fn get_attestations_by_issuer(env: Env, issuer: Address) -> soroban_sdk::Vec<UID> {
+        extend_instance_ttl(&env);
+        let total = index_total(&env, &(ATTESTER_TOTAL, issuer.clone()));
+        collect_filtered(
+            &env,
+            total,
+            |chunk_index| read_chunk(&env, &(issuer.clone(), chunk_index)),
+            true,
+        )
+    }
+
+    /// One page of the complete issuer history. Alias for
+    /// [`Indexer::get_atts_by_attester_paginated`]; see
+    /// [`Indexer::get_count_by_issuer`] for the issuer/attester naming (#310).
+    pub fn get_atts_by_issuer_paginated(
+        env: Env,
+        issuer: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<UID> {
+        extend_instance_ttl(&env);
+        if let Err(err) = check_query_limit(&env) {
+            panic_with_error!(&env, err);
+        }
+        let total = index_total(&env, &(ATTESTER_TOTAL, issuer.clone()));
+        collect_page(&env, total, cursor, limit, |chunk_index| {
+            read_chunk(&env, &(issuer.clone(), chunk_index))
+        })
+    }
+
+    /// Filtered issuer history. Alias for [`Indexer::get_attester_filtered`];
+    /// see [`Indexer::get_count_by_issuer`] for the issuer/attester naming
+    /// (#310).
+    pub fn get_issuer_filtered(
+        env: Env,
+        issuer: Address,
+        include_revoked: bool,
+    ) -> soroban_sdk::Vec<UID> {
+        if let Err(err) = check_query_limit(&env) {
+            panic_with_error!(&env, err);
+        }
+        let total = index_total(&env, &(ATTESTER_TOTAL, issuer.clone()));
+        collect_filtered(
+            &env,
+            total,
+            |chunk_index| read_chunk(&env, &(issuer.clone(), chunk_index)),
+            include_revoked,
+        )
+    }
+
+    /// Paginated active-only issuer history. Alias for
+    /// [`Indexer::get_recipient_page_filtered`]'s attester counterpart; see
+    /// [`Indexer::get_count_by_issuer`] for the issuer/attester naming
+    /// (#310).
+    pub fn get_issuer_page_filtered(
+        env: Env,
+        issuer: Address,
+        cursor: u32,
+        limit: u32,
+        include_revoked: bool,
+    ) -> soroban_sdk::Vec<UID> {
+        if let Err(err) = check_query_limit(&env) {
+            panic_with_error!(&env, err);
+        }
+        if limit == 0 {
+            return soroban_sdk::Vec::new(&env);
+        }
+        let total = index_total(&env, &(ATTESTER_TOTAL, issuer.clone()));
+        if cursor >= total {
+            return soroban_sdk::Vec::new(&env);
+        }
+        let mut out = soroban_sdk::Vec::new(&env);
+        let mut index = cursor;
+        let mut loaded: Option<u32> = None;
+        let mut chunk = soroban_sdk::Vec::new(&env);
+        while index < total && out.len() < limit {
+            let chunk_index = index / MAX_CHUNK_SIZE;
+            let chunk_offset = index % MAX_CHUNK_SIZE;
+            if loaded != Some(chunk_index) {
+                let Some(next) = read_chunk(&env, &(issuer.clone(), chunk_index)) else {
+                    break;
+                };
+                chunk = next;
+                loaded = Some(chunk_index);
+            }
+            if chunk_offset >= chunk.len() {
+                index = (chunk_index + 1) * MAX_CHUNK_SIZE;
+                continue;
+            }
+            if let Some(uid) = chunk.get(chunk_offset) {
+                if include_revoked || is_active(&env, &uid) {
+                    out.push_back(uid);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            index += 1;
+        }
+        out
     }
 
     /// Paginated active-only view: walks the underlying chunks and

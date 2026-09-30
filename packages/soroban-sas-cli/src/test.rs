@@ -246,6 +246,73 @@ mod tests {
     }
 
     #[test]
+    fn parses_attest_bulk_flags_with_safe_defaults() {
+        let cli = Cli::try_parse_from([
+            "soroban-sas",
+            "attest",
+            "bulk",
+            "--csv-file",
+            "attestations.csv",
+            "--contract-id",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        ])
+        .unwrap();
+
+        let Some(Commands::Attest {
+            action:
+                AttestCommands::Bulk {
+                    csv_file,
+                    dry_run,
+                    continue_on_error,
+                    max_ledger_skew,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected attest bulk command");
+        };
+        assert_eq!(csv_file, "attestations.csv");
+        // Issuing must be opt-in twice over: a batch is never submitted
+        // unless asked, and a failure stops the run unless asked otherwise.
+        assert!(!dry_run, "bulk must not submit by default");
+        assert!(
+            !continue_on_error,
+            "bulk must stop on first failure by default"
+        );
+        assert_eq!(max_ledger_skew, 300);
+    }
+
+    #[test]
+    fn attest_bulk_accepts_the_dry_run_and_continue_on_error_flags() {
+        let cli = Cli::try_parse_from([
+            "soroban-sas",
+            "attest",
+            "bulk",
+            "--csv-file",
+            "attestations.csv",
+            "--contract-id",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            "--dry-run",
+            "--continue-on-error",
+        ])
+        .unwrap();
+
+        let Some(Commands::Attest {
+            action:
+                AttestCommands::Bulk {
+                    dry_run,
+                    continue_on_error,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected attest bulk command");
+        };
+        assert!(dry_run);
+        assert!(continue_on_error);
+    }
+
+    #[test]
     fn decodes_data_as_hex_or_base64() {
         assert_eq!(
             decode_hex_or_base64("deadbeef").unwrap(),
@@ -465,11 +532,13 @@ mod tests {
                 network_passphrase: None,
                 contract_id: contract_id.to_string(),
                 rpc_url: None,
+                dry_run: false,
             },
             OutputFormat::Human,
             Some("testnet".to_string()),
             Some("../invalid".to_string()),
             None,
+            false,
         )
         .unwrap_err();
         assert!(set_error.contains("invalid --identity"));
@@ -480,11 +549,13 @@ mod tests {
                 network_passphrase: None,
                 contract_id: contract_id.to_string(),
                 rpc_url: None,
+                dry_run: false,
             },
             OutputFormat::Human,
             Some("testnet".to_string()),
             Some("../invalid".to_string()),
             None,
+            false,
         )
         .unwrap_err();
         assert!(clear_error.contains("invalid --identity"));
@@ -511,11 +582,13 @@ mod tests {
                     contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
                         .to_string(),
                     rpc_url: Some("http://127.0.0.1:1".to_string()),
+                    dry_run: false,
                 },
                 OutputFormat::Human,
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap_err();
             assert_eq!(error, "--amount must be greater than 0");
@@ -551,6 +624,7 @@ mod tests {
                     network_passphrase,
                     registry_contract_id,
                     rpc_url,
+                    dry_run: _,
                 },
         }) = cli.command
         else {
@@ -584,11 +658,13 @@ mod tests {
                     network_passphrase: None,
                     registry_contract_id: contract_id.to_string(),
                     rpc_url: Some("http://127.0.0.1:1".to_string()),
+                    dry_run: false,
                 },
                 OutputFormat::Human,
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap_err();
             assert_eq!(error, "--amount must be greater than 0");
@@ -1108,6 +1184,7 @@ mod online_verification_tests {
             None,
             None,
             None,
+            true,
         );
         assert!(res.is_ok());
     }
@@ -1131,6 +1208,7 @@ mod online_verification_tests {
             None,
             None,
             None,
+            true,
         );
         assert!(res.is_ok());
     }
@@ -1401,16 +1479,34 @@ mod schema_withdraw_fees_tests {
                 assert_eq!(request["method"], expected_method);
                 let id = request["id"].clone();
                 let response = match expected_method {
-                    "getLedgerEntries" => serde_json::json!({
-                        "jsonrpc": "2.0", "id": id, "result": {
-                            "entries": [{
-                                "key": "AAAAAA==",
-                                "xdr": account_entry_xdr,
-                                "lastModifiedLedgerSeq": 1
-                            }],
-                            "latestLedger": 1
-                        }
-                    }),
+                    "getLedgerEntries" => {
+                        let entries: Vec<serde_json::Value> = request["params"]["keys"]
+                            .as_array()
+                            .map(|keys| {
+                                keys.iter()
+                                    .map(|k| {
+                                        serde_json::json!({
+                                            "key": k.as_str().unwrap_or("AAAAAA=="),
+                                            "xdr": &account_entry_xdr,
+                                            "lastModifiedLedgerSeq": 1
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| {
+                                vec![serde_json::json!({
+                                    "key": "AAAAAA==",
+                                    "xdr": &account_entry_xdr,
+                                    "lastModifiedLedgerSeq": 1
+                                })]
+                            });
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "result": {
+                                "entries": entries,
+                                "latestLedger": 1
+                            }
+                        })
+                    }
                     "simulateTransaction" => serde_json::json!({
                         "jsonrpc": "2.0", "id": id, "result": {
                             "latestLedger": 1,
@@ -1476,15 +1572,18 @@ mod schema_withdraw_fees_tests {
                 network_passphrase: Some("Test SDF Network ; September 2015".to_string()),
                 registry_contract_id: stellar_strkey::Contract([62u8; 32]).to_string(),
                 rpc_url: Some(url),
+                dry_run: false,
             },
             OutputFormat::Json,
             None,
             None,
             None,
+            true,
         );
         assert!(res.is_ok(), "withdraw-fees should settle: {res:?}");
     }
 }
+
 /// Issue #306: `query by-* --cursor/--limit` pagination flags.
 #[cfg(test)]
 mod pagination_query_tests {
@@ -1654,5 +1753,59 @@ mod pagination_query_tests {
         let attester = account();
         let (_, data) = format_page(Some(("attester", &attester)), &uids(&env, &[1]), 0, 1, 1);
         assert_eq!(data["attester"], attester.as_str());
+    }
+
+    fn canned_lines(answers: &[&str]) -> impl Iterator<Item = std::io::Result<String>> {
+        answers
+            .iter()
+            .map(|s| Ok(s.to_string()))
+            .collect::<std::vec::Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn build_schema_interactively_happy_path() {
+        let mut lines = canned_lines(&["name string", "age uint32", "", "CRESOLVER", "y"]);
+        let (schema, resolver, revocable) = crate::build_schema_interactively(&mut lines).unwrap();
+        assert_eq!(schema, "name string, age uint32");
+        assert_eq!(resolver, "CRESOLVER");
+        assert!(revocable);
+    }
+
+    #[test]
+    fn build_schema_interactively_retries_an_invalid_field() {
+        let mut lines = canned_lines(&["not a valid field!!", "name string", "", "CRESOLVER", "n"]);
+        let (schema, resolver, revocable) = crate::build_schema_interactively(&mut lines).unwrap();
+        assert_eq!(schema, "name string");
+        assert_eq!(resolver, "CRESOLVER");
+        assert!(!revocable);
+    }
+
+    #[test]
+    fn build_schema_interactively_requires_at_least_one_field() {
+        let mut lines = canned_lines(&["", "name string", "", "CRESOLVER", "yes"]);
+        let (schema, ..) = crate::build_schema_interactively(&mut lines).unwrap();
+        assert_eq!(schema, "name string");
+    }
+
+    #[test]
+    fn build_schema_interactively_retries_an_empty_resolver() {
+        let mut lines = canned_lines(&["name string", "", "", "CRESOLVER", "no"]);
+        let (_, resolver, _) = crate::build_schema_interactively(&mut lines).unwrap();
+        assert_eq!(resolver, "CRESOLVER");
+    }
+
+    #[test]
+    fn build_schema_interactively_retries_an_invalid_revocable_answer() {
+        let mut lines = canned_lines(&["name string", "", "CRESOLVER", "maybe", "y"]);
+        let (_, _, revocable) = crate::build_schema_interactively(&mut lines).unwrap();
+        assert!(revocable);
+    }
+
+    #[test]
+    fn build_schema_interactively_fails_on_unexpected_eof() {
+        let mut lines = canned_lines(&["name string", ""]);
+        let err = crate::build_schema_interactively(&mut lines).unwrap_err();
+        assert_eq!(err, "unexpected end of input");
     }
 }
