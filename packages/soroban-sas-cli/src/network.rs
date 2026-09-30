@@ -161,7 +161,10 @@ mod tests {
     #[test]
     fn mock_client_satisfies_the_network_client_trait() {
         fn takes_client(client: &dyn NetworkClient) -> (String, String) {
-            (client.rpc_url().to_string(), client.network_passphrase().to_string())
+            (
+                client.rpc_url().to_string(),
+                client.network_passphrase().to_string(),
+            )
         }
 
         let config = resolve_network("futurenet").unwrap();
