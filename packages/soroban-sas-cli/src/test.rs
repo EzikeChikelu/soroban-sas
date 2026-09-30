@@ -14,7 +14,6 @@ mod tests {
         assert_eq!(1, 1);
     }
 
-
     #[test]
     fn attest_flags_default_to_network_time_with_local_fallback_off() {
         let cli = Cli::try_parse_from([
