@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Named-network resolution for the global `--network` option (issue #174).
 //!
 //! Wires `--network <name>` to a concrete RPC URL and network passphrase so

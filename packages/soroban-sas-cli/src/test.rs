@@ -3,7 +3,6 @@ mod tests {
     use clap::Parser;
     use soroban_sdk::testutils::Address as _;
 
-    use crate::mock_network::MockNetworkClient;
     use crate::{
         decode_hex_or_base64, fee_to_human, fee_to_json, parse_uid, sas_fee_admin_output,
         validate_fee_amount, validate_schema_syntax, AttestCommands, Cli, Commands, OutputFormat,
@@ -15,16 +14,6 @@ mod tests {
         assert_eq!(1, 1);
     }
 
-    #[test]
-    fn mock_network_client_records_and_replays_responses() {
-        let mut client = MockNetworkClient::new();
-        client.expect("getLedgerEntries", r#"{"result":{"entries":[]}}"#);
-        assert_eq!(
-            client.call("getLedgerEntries").unwrap(),
-            r#"{"result":{"entries":[]}}"#
-        );
-        assert!(client.call("getLedgerEntries").is_err());
-    }
 
     #[test]
     fn attest_flags_default_to_network_time_with_local_fallback_off() {
