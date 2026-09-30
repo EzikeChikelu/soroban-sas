@@ -8,10 +8,19 @@ mod tests {
         validate_fee_amount, validate_schema_syntax, AttestCommands, Cli, Commands, OutputFormat,
         SasCommands, SchemaCommands,
     };
+    use crate::mock_network::MockNetworkClient;
 
     #[test]
     fn test_cli_snapshot_formatting() {
         assert_eq!(1, 1);
+    }
+
+    #[test]
+    fn mock_network_client_records_and_replays_responses() {
+        let mut client = MockNetworkClient::new();
+        client.expect("getLedgerEntries", r#"{"result":{"entries":[]}}"#);
+        assert_eq!(client.call("getLedgerEntries").unwrap(), r#"{"result":{"entries":[]}}"#);
+        assert!(client.call("getLedgerEntries").is_err());
     }
 
     #[test]

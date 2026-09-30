@@ -11,6 +11,10 @@
 //!    these automatically when the flag itself is absent.
 //! 3. The global `--network <name>` shorthand, resolved by this module.
 //! 4. Otherwise: a clear error naming what's missing.
+//!
+//! For unit tests, [`MockNetworkClient`] provides an in-memory implementation
+//! of the network client trait so command logic can be exercised without
+//! touching a live RPC endpoint.
 
 /// Resolved connection details for a named network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +54,51 @@ pub fn resolve_network(name: &str) -> Result<NetworkConfig, String> {
         }
     };
     Ok(config)
+}
+
+/// Minimal network client abstraction used by the CLI when talking to an RPC
+/// endpoint. Kept intentionally small so it can be mocked in unit tests.
+pub trait NetworkClient {
+    /// Returns the RPC URL this client is configured to talk to.
+    fn rpc_url(&self) -> &str;
+
+    /// Returns the network passphrase this client is configured for.
+    fn network_passphrase(&self) -> &str;
+}
+
+/// In-memory [`NetworkClient`] for unit testing.
+///
+/// Construct one from a [`NetworkConfig`] (or directly from a URL and
+/// passphrase) and hand it to code under test in place of a real client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockNetworkClient {
+    rpc_url: String,
+    network_passphrase: String,
+}
+
+impl MockNetworkClient {
+    /// Builds a mock client from an explicit RPC URL and passphrase.
+    pub fn new(rpc_url: impl Into<String>, network_passphrase: impl Into<String>) -> Self {
+        Self {
+            rpc_url: rpc_url.into(),
+            network_passphrase: network_passphrase.into(),
+        }
+    }
+
+    /// Builds a mock client from a resolved [`NetworkConfig`].
+    pub fn from_config(config: &NetworkConfig) -> Self {
+        Self::new(config.rpc_url.clone(), config.network_passphrase.clone())
+    }
+}
+
+impl NetworkClient for MockNetworkClient {
+    fn rpc_url(&self) -> &str {
+        &self.rpc_url
+    }
+
+    fn network_passphrase(&self) -> &str {
+        &self.network_passphrase
+    }
 }
 
 #[cfg(test)]
@@ -92,5 +141,33 @@ mod tests {
         let futurenet = resolve_network("futurenet").unwrap();
         assert_ne!(testnet.rpc_url, futurenet.rpc_url);
         assert_ne!(testnet.network_passphrase, futurenet.network_passphrase);
+    }
+
+    #[test]
+    fn mock_client_exposes_the_url_and_passphrase_it_was_built_with() {
+        let client = MockNetworkClient::new("http://localhost:8000/soroban/rpc", "Standalone");
+        assert_eq!(client.rpc_url(), "http://localhost:8000/soroban/rpc");
+        assert_eq!(client.network_passphrase(), "Standalone");
+    }
+
+    #[test]
+    fn mock_client_can_be_built_from_a_resolved_network_config() {
+        let config = resolve_network("testnet").unwrap();
+        let client = MockNetworkClient::from_config(&config);
+        assert_eq!(client.rpc_url(), config.rpc_url);
+        assert_eq!(client.network_passphrase(), config.network_passphrase);
+    }
+
+    #[test]
+    fn mock_client_satisfies_the_network_client_trait() {
+        fn takes_client(client: &dyn NetworkClient) -> (String, String) {
+            (client.rpc_url().to_string(), client.network_passphrase().to_string())
+        }
+
+        let config = resolve_network("futurenet").unwrap();
+        let client = MockNetworkClient::from_config(&config);
+        let (url, passphrase) = takes_client(&client);
+        assert_eq!(url, config.rpc_url);
+        assert_eq!(passphrase, config.network_passphrase);
     }
 }
